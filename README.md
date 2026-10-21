@@ -12,11 +12,12 @@ A modular, lightweight Retrieval-Augmented Generation (RAG) knowledge retrieval 
 │   ├── data/
 │   │   └── policy.txt            # Sample domain knowledge base
 │   ├── chroma_db/                # Persistent vector database (ChromaDB)
-│   ├── chunking.py               # Sliding-window text chunker
+│   ├── config.py                 # Centralized environment & pipeline configuration
+│   ├── chunking.py               # Token-aware sliding-window chunker
 │   ├── indexer.py                # ChromaDB collection & upsert manager
 │   ├── retriever.py              # Semantic search & fallback threshold logic
 │   ├── main.py                   # End-to-end execution script
-│   └── requirements.txt          # Python dependencies for rag_pipeline
+│   └── requirements.txt          # Python dependencies (chromadb, tiktoken, etc.)
 │
 ├── .gitignore                    # Shared repository gitignore
 └── README.md                     # Root project documentation (this file)

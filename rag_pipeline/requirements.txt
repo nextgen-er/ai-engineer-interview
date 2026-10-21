@@ -1,1 +1,5 @@
 chromadb>=0.4.22
+pydantic-settings>=2.1.0
+tiktoken>=0.6.0
+sentence-transformers>=2.5.0
+torch>=2.1.0

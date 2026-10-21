@@ -1,46 +1,70 @@
+import logging
 from pathlib import Path
-from chunking import chunk_text
-from indexer import get_collection, index_chunks
-from retriever import retrieve_with_fallback
+from config import settings
+from chunking import TokenAwareChunker
+from indexer import get_chroma_client, get_or_create_collection, batch_upsert_chunks
+from retriever import GuardedRetriever
+import os
+os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("sentence_transformers").setLevel(logging.WARNING)
+
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+)
+logger = logging.getLogger("RAGPipeline")
 
 
 def main():
-    collection = get_collection()
+    # 1. Initialize client & collection
+    client = get_chroma_client()
+    collection = get_or_create_collection(client)
 
-    file_path = Path("data/policy.txt")
-    if file_path.exists():
-        raw_text = file_path.read_text(encoding="utf-8")
-        chunks = chunk_text(raw_text, chunk_size=30, overlap=10)
-        print(f"Generated {len(chunks)} chunks from {file_path.name}")
-
-        index_chunks(collection, chunks, category="finance")
-        print("Indexed documents successfully.\n" + "-" * 50)
-
-    else:
-        print(f"Error: {file_path} not found")
+    # 2. Ingest domain documents
+    policy_path = Path("data/policy.txt")
+    if not policy_path.exists():
+        logger.error(f"Required document not found at {policy_path.resolve()}")
         return
 
+    raw_text = policy_path.read_text(encoding="utf-8")
+    chunker = TokenAwareChunker()
+    chunks = chunker.chunk_text(
+        raw_text,
+        chunk_size_tokens=settings.CHUNK_SIZE_TOKENS,
+        chunk_overlap_tokens=settings.CHUNK_OVERLAP_TOKENS,
+    )
+
+    batch_upsert_chunks(
+        collection=collection,
+        chunks=chunks,
+        source_name=policy_path.name,
+        category="finance",
+    )
+
+    # 3. Initialize Guarded Retriever
+    retriever = GuardedRetriever(collection=collection)
+
+    # 4. Evaluation Queries
     test_queries = [
-        "Do I need a receipt for a $30 Uber ride?",
-        "How do I configure Docker container?",
-        "What is the cap on daily food expenses?",
+        "Do I need a receipt for a $30 Uber ride?",  # Direct in-domain
+        "How do I configure Docker containers?",  # Completely out-of-domain
+        "What is the daily allowance cap on meals?",  # Paraphrased in-domain
     ]
 
-    threshold = 0.3
+    print("\n" + "=" * 70)
+    print("RUNNING RETRIEVAL EVALUATIONS")
+    print("=" * 70)
 
     for query in test_queries:
-        print(f"\nQuery: '{query}'")
-        doc, similarity, error_or_fallback = retrieve_with_fallback(
-            collection, query, threshold=threshold
-        )
+        print(f"\nEvaluating: '{query}'")
+        matched_doc, score, error = retriever.retrieve(query)
 
-        if doc:
-            print(f"Status: Match found (Similarity: {similarity:.3f})")
-            print(f"Document snippet: {doc}")
-
+        if matched_doc:
+            print(f"Status: [PASS] Confidence Score: {score:.3f}")
+            print(f"Retrieved Passage: {matched_doc}")
         else:
-            print(f"Status: Fallback Triggered")
-            print(f"Reason: {error_or_fallback}")
+            print(f"Status: [FALLBACK TRIGGERED] Score: {score:.3f}")
+            print(f"Reason: {error}")
 
 
 if __name__ == "__main__":
