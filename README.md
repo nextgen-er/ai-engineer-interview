@@ -45,16 +45,35 @@ flowchart TD
 
 ### Features
 
-- Sliding-Window Chunking: Word-based chunking with configurable window and overlap sizes, ensuring boundary contexts are preserved without token truncation.
-- Local Dense Embeddings: Employs ChromaDB's default ONNX runtime (all-MiniLM-L6-v2) generating 384-dimensional dense vectors locally—no external API keys required.
-- Idempotent Ingestion: Uses collection.upsert() with deterministic IDs to avoid index bloat and duplicate entries across re-runs.
-- Cosine Space Metric: Vector collection explicitly mapped to cosine space (hnsw:space: cosine), ensuring predictable similarity bounds.
-- Confidence Guardrail Gate: Calculates semantic similarity ($1.0 - \text{distance}$) and routes low-confidence or irrelevant queries to a fallback path rather than blindly returning irrelevant passages.
+- **Token-Aware Chunking**: Subword token-aware chunking (via `tiktoken`) with configurable chunk size and token overlap, ensuring chunk boundaries respect model token constraints.
+- **Two-Stage Retrieval (Bi-Encoder + Cross-Encoder)**: Uses ChromaDB for fast candidate retrieval (high recall) and a Cross-Encoder reranker (`sentence-transformers`) for deep cross-attention semantic scoring (high precision).
+- **Logit Calibration via Temperature Scaling**: Converts raw Cross-Encoder output logits into calibrated probabilities in the range [0, 1] using a temperature-scaled sigmoid function ($T = 2.0$).
+- **Centralized Configuration**: All thresholds, model identifiers, chunking parameters, and vector DB paths are decoupled and managed via `config.py`.
+- **Deterministic Ingestion**: Employs `collection.upsert()` with deterministic document IDs to prevent duplicate vectors and index bloat across re-runs.
 
 
 ### Why Confidence Guardrails Matter
 
-Standard vector databases employ Approximate Nearest Neighbor (ANN) search, which is greedy—it will return the closest match regardless of relevance.
-For instance, querying "How do I configure Docker container?" against a corporate travel policy database will still return the closest travel policy clause if unmoderated. By computing:
-$$\text{Similarity} = 1.0 - \text{Cosine Distance}$$
-and gating on threshold = 0.30, the system rejects the match ($0.009 < 0.30$) and issues a fallback routing message, safeguarding downstream LLMs from hallucination and prompt contamination.
+Standard vector search (Approximate Nearest Neighbor / ANN) is inherently greedy—it unconditionally returns the top-$K$ nearest vectors even if the query is entirely out of domain. In a pure vector setup, querying *"How do I configure a Docker container?"* against a corporate travel policy database forces the engine to return the closest travel policy clause. Passing these low-relevance passages directly to a downstream LLM induces hallucination, context dilution, and prompt contamination.
+
+While bi-encoder cosine distance can filter gross mismatches, it evaluates queries and documents independently into static vector embeddings, frequently producing false positives due to surface-level lexical overlap. 
+
+By layering a **Cross-Encoder reranker** as an evaluation gate:
+1. The query and candidate documents are processed simultaneously across full self-attention layers.
+2. The model evaluates whether the candidate passage genuinely answers or satisfies the query.
+3. If the calibrated score falls below the confidence cutoff (e.g., $\text{Score} < 0.30$), the system halts passage injection and triggers a fallback response instead of forwarding irrelevant context.
+
+
+### Guardrailing Changes
+
+The guardrailing mechanism transitions from static vector space distance checks to calibrated cross-encoder inference:
+
+- **Scoring Paradigm Shift**:
+  - *Previous Approach*: Depended on bi-encoder cosine distance inversion:
+    $$\text{Similarity} = 1.0 - \text{Cosine Distance}$$
+  - *Current Approach*: Evaluates joint `(query, document)` token pairs via `CrossEncoder.predict()` and maps output logits to a smooth probability using temperature-scaled sigmoid activation:
+    $$\text{Calibrated Score} = \frac{1}{1 + e^{-\frac{\text{logit}}{T}}} \quad \text{where } T = 2.0$$
+
+- **Role of Vector Search**: ChromaDB's vector similarity no longer makes the final acceptance or rejection decision. It serves exclusively as a high-recall candidate generator (top-$K$), handing off the top candidates to the reranker.
+
+- **Explicit Fallback Path**: The pipeline compares the top candidate's calibrated score against `settings.CONFIDENCE_THRESHOLD`. If below the threshold, it suppresses the document context, sets the payload to `None`, and routes the interaction to a formal fallback message.
