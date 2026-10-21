@@ -77,3 +77,72 @@ The guardrailing mechanism transitions from static vector space distance checks 
 - **Role of Vector Search**: ChromaDB's vector similarity no longer makes the final acceptance or rejection decision. It serves exclusively as a high-recall candidate generator (top-$K$), handing off the top candidates to the reranker.
 
 - **Explicit Fallback Path**: The pipeline compares the top candidate's calibrated score against `settings.CONFIDENCE_THRESHOLD`. If below the threshold, it suppresses the document context, sets the payload to `None`, and routes the interaction to a formal fallback message.
+
+
+## Asynchronous SSE Streaming Service with Disconnect Detection
+A high-throughput, resilient token streaming microservice built with FastAPI, Uvicorn, and Starlette `StreamingResponse`. This project demonstrates production-grade Server-Sent Events (SSE) streaming for LLMs, active TCP connection polling, task cancellation propagation, and resource cleanup guarantees to eliminate orphaned inference workloads.
+
+### Repository Structure
+```text
+.
+├── fastapi-sse-disconnect-lab/
+|   ├── static/
+|   │   └── index.html            # Fetch API client with AbortController UI
+|   ├── mock_data.py              # Centralized token corpus, defaults & mock payloads
+|   ├── mock_llm.py               # Async token generator simulating inference latency
+|   ├── main.py                   # FastAPI app, SSE route & disconnect detection lifecycle
+|   ├── client_test.py            # Automated httpx test harness simulating abrupt TCP drops
+|   └── requirements.txt          # Service dependencies (fastapi, uvicorn, httpx)
+│
+├── .gitignore                    # Shared repository gitignore
+└── README.md                     # Root project documentation (this file)
+```
+
+### Architecture Overview
+
+```mermaid
+flowchart TD
+    subgraph Client["[ Client Layer ]"]
+        C1[Browser / HTTP Client] -- "POST /api/chat/stream" --> S1[FastAPI Route]
+        C2["User Clicks Abort / Closes Tab"] -. "TCP FIN / RST" .-> S1
+    end
+
+    subgraph Service["[ Streaming & Lifecycle Engine ]"]
+        S1 --> SR["StreamingResponse (text/event-stream)"]
+        SR --> AG["Async Event Generator"]
+        
+        AG --> CHK{"await request.is_disconnected()"}
+        CHK -->|False| YLD["Yield SSE Chunk (data: {...})"]
+        YLD --> GEN["mock_llm_stream / Upstream LLM"]
+        GEN --> AG
+        
+        CHK -->|True| BRK["Break Loop & Stop Upstream Generation"]
+        AG -. "asyncio.CancelledError" .-> CERR["Catch Cancellation"]
+        
+        BRK --> FIN["finally: Teardown & Free Compute Resources"]
+        CERR --> FIN
+    end
+```
+
+### Features
+- **Standardized Server-Sent Events (SSE)**: Streams text tokens wrapped in standard data: `{"token": "...", "index": N}\n\n` frames, terminating cleanly with an explicit data: `[DONE]\n\n` sentinel.
+
+- **Dual-Layer Disconnect Detection**:
+    - Proactive State Polling: Interrogates `await request.is_disconnected()` prior to producing each subsequent token, preventing unnecessary calls to upstream inference engines.
+    - Reactive Task Cancellation: Traps `asyncio.CancelledError` raised when the ASGI server (Uvicorn) terminates the socket coroutine upon receiving a TCP RST/FIN packet.
+
+- **Guaranteed Cleanup Semantics**: Encapsulates generator loops inside `try...finally` blocks to guarantee that upstream HTTP client sessions, database contexts, and GPU resources are promptly released.
+
+- **Proxy-Aware Buffering Headers**: Includes `X-Accel-Buffering: no and Cache-Control: no-cache` response headers to prevent reverse proxies (e.g., NGINX, Cloudflare) from buffering chunks and delaying time-to-first-token (TTFT).
+
+- **Separation of Concerns**: Decouples mock data corpora `(mock_data.py)` and simulated upstream generation `(mock_llm.py)` from the HTTP routing and lifecycle layer `(main.py)`.
+
+
+### Why Client Disconnect Detection Matters?
+In generative AI applications, inference is compute-bound, costly, and high-latency. Without active disconnect monitoring:
+
+1. The Ghost Computation Problem: If a client navigates away, closes a mobile app, or clicks "Stop Generating", standard async generators continue executing until the completion of `max_tokens`.
+2. Resource Exhaustion: Model servers (vLLM, Ollama, Triton) or billable third-party endpoints continue consuming compute and rate limits for outputs that no client will ever consume.
+3. Connection Leaks: Background tasks left running without active consumer streams cause event-loop lag and gradual resource starvation.
+
+Integrating `request.is_disconnected()` combined with asyncio.CancelledError interceptors ensures that compute termination occurs within a single token latency window of the client dropping the connection.

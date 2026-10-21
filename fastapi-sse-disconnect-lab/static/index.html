@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>FastAPI SSE Disconnect Demo</title>
+    <style>
+        body { font-family: system-ui, sans-serif; max-width: 650px; margin: 40px auto; line-height: 1.5; padding: 0 16px; }
+        textarea, button { font-size: 14px; margin-top: 8px; }
+        textarea { width: 100%; height: 60px; box-sizing: border-box; }
+        #output { background: #f4f4f5; padding: 12px; border-radius: 6px; min-height: 120px; white-space: pre-wrap; margin-top: 16px; border: 1px solid #e4e4e7; }
+        .buttons { display: flex; gap: 8px; margin-top: 8px; }
+        .status { font-weight: bold; }
+    </style>
+</head>
+<body>
+    <h2>FastAPI SSE Disconnect Demonstration</h2>
+    <label for="prompt">Prompt:</label>
+    <textarea id="prompt">Explain why connection tracking matters in LLM inference.</textarea>
+
+    <div class="buttons">
+        <button id="sendBtn" onclick="startStream()">Generate Stream</button>
+        <button id="cancelBtn" onclick="cancelStream()" disabled>Cancel Stream (Disconnect)</button>
+    </div>
+
+    <p>Status: <span id="status" class="status">Idle</span></p>
+    <div id="output"></div>
+
+    <script>
+        let abortController = null;
+
+        async function startStream() {
+            const prompt = document.getElementById("prompt").value;
+            const output = document.getElementById("output");
+            const status = document.getElementById("status");
+            const sendBtn = document.getElementById("sendBtn");
+            const cancelBtn = document.getElementById("cancelBtn");
+
+            output.textContent = "";
+            status.textContent = "Connecting...";
+            sendBtn.disabled = true;
+            cancelBtn.disabled = false;
+
+            abortController = new AbortController();
+
+            try {
+                const response = await fetch("/api/chat/stream", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ prompt, max_tokens: 60, delay_per_token: 0.15 }),
+                    signal: abortController.signal
+                });
+
+                if (!response.ok) throw new Error(`HTTP error: ${response.status}`);
+
+                status.textContent = "Streaming...";
+                const reader = response.body.getReader();
+                const decoder = new TextDecoder("utf-8");
+                let buffer = "";
+
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+
+                    buffer += decoder.decode(value, { stream: true });
+                    const lines = buffer.split("\n\n");
+                    buffer = lines.pop(); // Keep unfinished chunk in buffer
+
+                    for (const line of lines) {
+                        if (line.startsWith("data: ")) {
+                            const data = line.replace("data: ", "").trim();
+                            if (data === "[DONE]") {
+                                status.textContent = "Finished";
+                                break;
+                            }
+                            try {
+                                const parsed = JSON.parse(data);
+                                output.textContent += parsed.token;
+                            } catch (e) {
+                                console.error("Error parsing chunk:", e);
+                            }
+                        }
+                    }
+                }
+            } catch (err) {
+                if (err.name === "AbortError") {
+                    status.textContent = "Aborted by client (Inspect server logs to verify cancellation!)";
+                } else {
+                    status.textContent = "Error: " + err.message;
+                }
+            } finally {
+                sendBtn.disabled = false;
+                cancelBtn.disabled = true;
+                abortController = null;
+            }
+        }
+
+        function cancelStream() {
+            if (abortController) {
+                abortController.abort();
+            }
+        }
+    </script>
+</body>
+</html>
