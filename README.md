@@ -146,3 +146,84 @@ In generative AI applications, inference is compute-bound, costly, and high-late
 3. Connection Leaks: Background tasks left running without active consumer streams cause event-loop lag and gradual resource starvation.
 
 Integrating `request.is_disconnected()` combined with asyncio.CancelledError interceptors ensures that compute termination occurs within a single token latency window of the client dropping the connection.
+
+
+## Agent Tool Execution Registry & Guardrails
+A secure, production-grade tool execution registry designed for autonomous AI agents. This repository enforces multi-layered runtime safety invariants—including strict argument schema validation, role-based permission scoping, deterministic idempotency checking, and indirect prompt injection defense.
+
+### Repository Structure
+```text
+.
+├── agent-tool-registry-lab/
+|   ├── requirements.txt
+|   ├── security/
+|   │   ├── permissions.py       # RBAC & Scope enforcement
+|   │   ├── idempotency.py       # Deterministic hashing & replay cache
+|   │   └── injection_guard.py   # Heuristic detection & XML isolation
+|   ├── tools/
+|   │   ├── base.py              # BaseTool abstraction & JSON Schema exporter
+|   │   └── implementations.py   # Sample tools (TransferFunds, FetchExternalDoc)
+|   ├── registry.py              # Central execution pipeline orchestrator
+|   ├── main.py                  # End-to-end attack and workflow simulations
+|   └── tests/
+|       └── test_registry.py     # Automated test suite
+│
+├── .gitignore                    # Shared repository gitignore
+└── README.md                     # Root project documentation (this file)
+```
+
+### Architecture Overview
+When an LLM agent issues a tool invocation request, passing arguments straight to an unvalidated function introduces severe attack surfaces (e.g., privilege escalation, state replay, untrusted instruction poisoning).
+This registry interposes a strict, six-stage deterministic execution pipeline:
+
+```text
+[ LLM Agent Tool Call ]
+           │
+           ▼
+┌─────────────────────────┐
+│ 1. Permission Scoping   │ ──(Lacks Scope)──► [ PERMISSION_DENIED ]
+└──────────┬──────────────┘
+           │ (Allowed)
+           ▼
+┌─────────────────────────┐
+│ 2. Schema Validation    │ ──(Malformed)────► [ VALIDATION_ERROR ]
+└──────────┬──────────────┘
+           │ (Valid)
+           ▼
+┌─────────────────────────┐
+│ 3. Idempotency Check    │ ──(Cache Hit)────► [ SUCCESS_CACHED (Replay) ]
+└──────────┬──────────────┘
+           │ (Cache Miss)
+           ▼
+┌─────────────────────────┐
+│ 4. Tool Execution       │ ──(Exception)────► [ EXECUTION_FAILURE ]
+└──────────┬──────────────┘
+           │ (Raw Output)
+           ▼
+┌─────────────────────────┐
+│ 5. Save Idempotency     │
+└──────────┬──────────────┘
+           │
+           ▼
+┌─────────────────────────┐
+│ 6. Injection Defense    │ ──► [ Heuristic Scan & XML Isolation Block ]
+└──────────┬──────────────┘
+           │
+           ▼
+[ Safe LLM Context Payload ]
+```
+
+### Core Security Invariants
+1. Permission Scoping (RBAC)
+Every registered tool declares an explicit operational requirement via Scope (READ, WRITE, FINANCIAL, ADMIN). Calls are intercepted before inspecting parameters or invoking logic. If the caller's SecurityContext lacks the prerequisite scope, the pipeline halts immediately with PERMISSION_DENIED.
+2. Pydantic Argument Validation
+Tools define parameter schemas using Pydantic BaseModel classes with explicit constraints (e.g., regex patterns, positive numeric bounds, default enums). In addition to runtime validation, schemas can be exported as standard JSON Schemas compatible with OpenAI, Anthropic, and Gemini function calling interfaces.
+3. Deterministic Idempotency Guard
+Non-idempotent operations risk severe side-effects when an agent enters retry loops. The idempotency manager:
+- Canonicalizes arguments via `json.dumps(payload, sort_keys=True)`.
+- Hashes `(tool_name:user_id:canonical_payload) using SHA-256`.
+- Checks an in-memory TTL store. If found, it bypasses downstream execution and replays the cached result `(SUCCESS_CACHED)`.
+4. Indirect Prompt Injection Defense
+Data retrieved from third-party APIs, web scraping, or ticket systems may contain adversarial instructions designed to hijack upstream model attention.
+- **Pattern Matching**: Inspects untrusted tool outputs against heuristic regex signatures (e.g., ignore previous instructions, system: you are now).
+- **Semantic XML Encapsulation**: Neutralizes markdown code fences and special tokens `(<|im_start|>)`, encapsulating untrusted content inside `<untrusted_tool_data>` boundary tags so system prompts treat it as passive data rather than instructions.
