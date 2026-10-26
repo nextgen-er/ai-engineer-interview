@@ -227,3 +227,68 @@ Non-idempotent operations risk severe side-effects when an agent enters retry lo
 Data retrieved from third-party APIs, web scraping, or ticket systems may contain adversarial instructions designed to hijack upstream model attention.
 - **Pattern Matching**: Inspects untrusted tool outputs against heuristic regex signatures (e.g., ignore previous instructions, system: you are now).
 - **Semantic XML Encapsulation**: Neutralizes markdown code fences and special tokens `(<|im_start|>)`, encapsulating untrusted content inside `<untrusted_tool_data>` boundary tags so system prompts treat it as passive data rather than instructions.
+
+
+## Automated RAG Evaluation, Semantic Caching & Token Observability
+A production-pattern RAG governance engine built with pure Python and NumPy. This sub-project addresses context ranking decay, hallucination grounding, semantic query duplication, and upstream API cost monitoring by implementing vectorized query caching, Ragas-style evaluation metrics (Context Precision@K, Faithfulness), and a granular token/cost ledger.
+
+### Repository Structure
+```text
+.
+├── rag-eval-cache-lab/
+│   ├── rag_engine/
+│   │   ├── __init__.py
+│   │   ├── cache.py          # Vector cache & NumPy cosine similarity lookup
+│   │   ├── token_tracker.py  # Exact token estimator & cost accounting ledger
+│   │   └── metrics.py        # Context Precision & statement-level Faithfulness
+│   ├── main.py               # End-to-end benchmark, cache hit/miss & eval run
+│   └── requirements.txt      # Lab dependencies (numpy, scikit-learn, sentence-transformers)
+│
+├── .gitignore                # Shared repository gitignore
+└── README.md                 # Root project documentation (this file)
+```
+
+### Architecture Overview
+
+```mermaid
+flowchart TD
+    subgraph ClientQuery["[ Query Pipeline ]"]
+        Q[User Query] --> EMB[Query Embedding]
+        EMB --> SC{Semantic Cache Lookup}
+    end
+
+    subgraph CacheEngine["[ Semantic Caching & Cost Ledger ]"]
+        SC -->|Cosine Sim >= 0.82| HIT[Cache Hit: $0.00 Incurred]
+        HIT --> TT_HIT[Record Token & Cost Savings]
+        TT_HIT --> RET_CACHED[Return Cached Generation]
+        
+        SC -->|Cosine Sim < 0.82| MISS[Cache Miss: Invoke RAG & LLM]
+        MISS --> RETR[Retrieve Context Chunks]
+        RETR --> GEN[Generate Completion]
+        GEN --> PUT[Put Vector + Response to Cache]
+        PUT --> TT_MISS[Record Incurred Token Usage & USD Cost]
+    end
+
+    subgraph EvalEngine["[ Evaluation & Grounding Layer ]"]
+        GEN --> EVAL[RAG Evaluator]
+        RETR --> EVAL
+        GT[(Ground Truth)] --> EVAL
+        
+        EVAL --> CP["Context Precision@K (Mean Average Precision)"]
+        EVAL --> FH["Faithfulness (Sentence Extraction & Token Grounding)"]
+    end
+```
+
+### Features
+
+- **NumPy Vectorized Semantic Caching**: Fully vector-driven query lookup using pure NumPy matrix dot-product cosine similarity. Automatically identifies semantically equivalent prompts above a configurable similarity threshold (default $\ge 0.82$) and returns cached responses with zero model invocation cost.
+- **Context Precision@K (Ragas Mechanics)**: Implements Mean Average Precision (MAP) ranking evaluation to penalize pipelines where irrelevant or noisy chunks precede relevant evidence in top retrieval slots:
+$$\text{Context Precision@K} = \frac{\sum_{k=1}^K \left( \text{Precision@}k \times I_k \right)}{\text{Total Relevant Chunks}}$$
+- **Faithfulness & Grounding Verification**: Breaks generated answers into atomic assertions and calculates context entailment ratios, deterministically detecting hallucinations and ungrounded factual assertions.
+- **Token & Cost Accounting Ledger**: Tracks granular prompt and completion token counts against defined model pricing tiers ($/1M tokens) while maintaining real-time tracking of capital saved via semantic cache hits.
+- **Zero-Dependency Fallback**: Designed with a graceful fallback to a deterministic n-gram hashing embedder when offline or operating in environments without external embedding weights.
+
+### Why Retrieval Evaluation & Semantic Caching Matters?
+- **Silent Ranking Degradation**: Standard RAG pipelines often retrieve relevant context, but place it lower down the prompt context window ($K \ge 3$). Due to LLM "lost-in-the-middle" attention degradation, high chunk recall does not guarantee answer quality. Context Precision quantitatively exposes ranking quality.
+- **Ungrounded Hallucination**: LLMs synthesize plausible-sounding claims not supported by the injected context. The Faithfulness metric decomposes generations into verifiable claims to verify strict context attribution before serving completions to end users.
+- **Redundant Inference Spend**: Across user bases, a high percentage of queries are semantically identical rephrasings (e.g., "What do vector embeddings do?" vs. "Explain what vector embeddings are doing"). Standard key-value caches miss these completely. Semantic caching intercepts these variations at the vector layer, dropping marginal latency to milliseconds and marginal inference costs to zero.
