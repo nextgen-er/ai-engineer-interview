@@ -28,18 +28,21 @@ A modular, lightweight Retrieval-Augmented Generation (RAG) knowledge retrieval 
 ```mermaid
 flowchart TD
     subgraph Ingestion["[ Ingestion Pipeline ]"]
-        A[Raw Document .txt] --> B[Sliding Window Chunking]
-        B --> C["ONNX Embeddings (all-MiniLM-L6-v2)"]
-        C --> D[(ChromaDB)]
+        A[Raw Document .txt] --> B["Token-Aware Chunking (tiktoken)"]
+        B --> C["Dense Embeddings (all-MiniLM-L6-v2)"]
+        C --> D[("ChromaDB Index (HNSW Cosine)")]
     end
 
-    subgraph Retrieval["[ Retrieval Pipeline ]"]
-        Q[User Query] --> V[Vectorization]
-        V --> S[ANN Cosine Search]
-        S --> M["Metric Evaluator (1.0 - Distance)"]
+    subgraph Retrieval["[ Two-Stage Retrieval Pipeline ]"]
+        Q[User Query] --> V[Dense Query Vector]
+        V --> S["Stage 1: ANN Candidate Search (Top-K)"]
+        D -.->|Fetch Candidates| S
         
-        M -->|Similarity >= 0.30| R1["[ Context Returned ]"]
-        M -->|Similarity < 0.30| R2["[ Fallback Triggered ]"]
+        S --> R["Stage 2: Cross-Encoder Re-ranker\nms-marco-MiniLM-L6-v2"]
+        R --> Cfg["Logit Calibration\nSigmoid with T=2.0"]
+        
+        Cfg -->|Score >= Threshold| R1["[ Context Accepted & Returned ]"]
+        Cfg -->|Score < Threshold| R2["[ Guardrail Fallback Triggered ]"]
     end
 ```
 
